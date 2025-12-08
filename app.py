@@ -4,33 +4,38 @@ import numpy as np
 import joblib
 from pathlib import Path
 
+# -----------------------------------------------------------------------------
 # Фикс несовместимости версий sklearn при загрузке Pipeline из pickle
-import sklearn.compose._column_transformer as _ct
+# (нужен, если модель обучалась в одной версии sklearn, а запускается в другой)
+# -----------------------------------------------------------------------------
+try:
+    import sklearn.compose._column_transformer as _ct  # type: ignore
+
+    if not hasattr(_ct, "_RemainderColsList"):
+
+        class _RemainderColsList(list):
+            """Заглушка для старого внутреннего класса sklearn.
+            Нужна только для корректной распаковки сохраненной модели."""
+
+            pass
+
+        _ct._RemainderColsList = _RemainderColsList
+except Exception:
+    # Если импорт не удался, просто продолжаем. загрузка модели может и так сработать.
+    pass
 
 
-if not hasattr(_ct, "_RemainderColsList"):
-    class _RemainderColsList(list):
-        """Заглушка для старого внутреннего класса sklearn.
-        Нужна только для корректной распаковки сохраненной модели."""
-        pass
-
-    _ct._RemainderColsList = _RemainderColsList
-
-
-st.set_page_config(page_title="EduRisk", layout="wide")
+# -----------------------------------------------------------------------------
+# Общие настройки страницы
+# -----------------------------------------------------------------------------
+st.set_page_config(
+    page_title="EduRisk. Прогноз исхода обучения",
+    layout="wide",
+)
 
 MODEL_PATH = Path(__file__).parent / "best_model.pkl"
 
-
-@st.cache_resource
-def load_model():
-    model = joblib.load(MODEL_PATH)
-    return model
-
-
-model = load_model()
-
-# Имена признаков, должны совпадать с обучением компактной модели
+# Имена признаков. порядок ДОЛЖЕН полностью совпадать с обучением модели.
 FEATURE_COLS = [
     "Daytime/evening attendance",
     "Debtor",
@@ -47,6 +52,7 @@ FEATURE_COLS = [
     "Curricular units 2nd sem (grade)",
 ]
 
+# Словари для человекочитаемых значений
 binary_map = {"Нет": 0, "Да": 1}
 gender_map = {"Женский": 0, "Мужской": 1}
 attendance_map = {
@@ -54,44 +60,75 @@ attendance_map = {
     "Вечерняя или другая форма": 0,
 }
 
+
+# -----------------------------------------------------------------------------
+# Загрузка модели
+# -----------------------------------------------------------------------------
+@st.cache_resource(show_spinner=True)
+def load_model():
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(
+            f"Файл модели не найден: {MODEL_PATH}. "
+            "Убедитесь, что best_model.pkl лежит рядом с app.py в репозитории."
+        )
+    model = joblib.load(MODEL_PATH)
+    return model
+
+
+# Пытаемся загрузить модель один раз при старте приложения
+try:
+    model = load_model()
+except Exception as e:
+    st.error(
+        "Не удалось загрузить модель. "
+        "Проверьте наличие файла best_model.pkl и версии зависимостей."
+    )
+    st.exception(e)
+    st.stop()
+
+
+# -----------------------------------------------------------------------------
+# Заголовок и описание
+# -----------------------------------------------------------------------------
 st.title("EduRisk. Прогноз академического исхода студента")
 
 st.markdown(
     """
-EduRisk использует предобученную модель машинного обучения.
-Цель. оценить вероятности трех исходов обучения.
+EduRisk использует предобученную модель машинного обучения для оценки **вероятностей трех исходов обучения**:
 
-* `Dropout`. отчисление  
-* `Enrolled`. продолжает обучение  
-* `Graduate`. успешно завершит обучение  
+* `Dropout` — отчисление  
+* `Enrolled` — продолжает обучение  
+* `Graduate` — успешно завершит обучение  
 
-Модель работает только на понятных признаках. возраст. форма обучения. стипендия.
-задолженности. статус иностранного студента. успеваемость за 1 и 2 семестры.
+Модель работает только на понятных признаках:
+форма обучения, пол, возраст, стипендия, задолженности,
+статус иностранного студента и успеваемость за 1 и 2 семестры.
 """
 )
 
+
+# -----------------------------------------------------------------------------
+# Форма ввода признаков
+# -----------------------------------------------------------------------------
 with st.sidebar:
     st.header("Параметры студента")
 
-    inputs = {}
+    inputs: dict[str, float | int] = {}
 
-    # Общая информация
+    # Блок: общая информация
     st.subheader("Общая информация")
 
     attend_ru = st.selectbox(
         "Форма обучения",
         list(attendance_map.keys()),
         help=(
-            "Дневная. если студент учится по стандартной дневной программе."
-            " Вечерняя или другая форма. если обучение в альтернативном формате."
+            "Дневная форма обучения — стандартная очная программа."
+            " Вечерняя или другая форма — любые альтернативные форматы."
         ),
     )
     inputs["Daytime/evening attendance"] = attendance_map[attend_ru]
 
-    gender_ru = st.selectbox(
-        "Пол",
-        list(gender_map.keys()),
-    )
+    gender_ru = st.selectbox("Пол", list(gender_map.keys()))
     inputs["Gender"] = gender_map[gender_ru]
 
     inputs["Age at enrollment"] = st.number_input(
@@ -100,41 +137,41 @@ with st.sidebar:
         min_value=16,
         max_value=70,
         step=1,
-        help="Обычно 17–30 лет, возможны нетипичные случаи, например возврат к учебе.",
+        help="Чаще всего 17–30 лет, но возможны нетипичные случаи (позднее поступление).",
     )
 
-    # Социально экономические факторы
+    # Блок: социально экономические факторы
     st.subheader("Социально экономические факторы")
 
     debtor_ru = st.selectbox(
         "Есть задолженность по оплате обучения",
         list(binary_map.keys()),
-        help="Да. если у студента есть непогашенная задолженность по оплате.",
+        help="Да — у студента есть непогашенная задолженность по оплате.",
     )
     inputs["Debtor"] = binary_map[debtor_ru]
 
     fees_ru = st.selectbox(
         "Оплата обучения внесена вовремя",
         list(binary_map.keys()),
-        help="Да. если все платежи за обучение внесены в срок.",
+        help="Да — все платежи за обучение внесены в срок.",
     )
     inputs["Tuition fees up to date"] = binary_map[fees_ru]
 
     scholar_ru = st.selectbox(
         "Получает стипендию",
         list(binary_map.keys()),
-        help="Да. если студент получает академическую или социальную стипендию.",
+        help="Да — студент получает академическую или социальную стипендию.",
     )
     inputs["Scholarship holder"] = binary_map[scholar_ru]
 
     intl_ru = st.selectbox(
         "Иностранный студент",
         list(binary_map.keys()),
-        help="Да. если студент имеет иностранное гражданство по отношению к вузу.",
+        help="Да — у студента иностранное гражданство по отношению к вузу.",
     )
     inputs["International"] = binary_map[intl_ru]
 
-    # Успеваемость. 1 семестр
+    # Блок: успеваемость 1 семестра
     st.subheader("Успеваемость. 1 семестр")
 
     inputs["Curricular units 1st sem (enrolled)"] = st.number_input(
@@ -143,12 +180,12 @@ with st.sidebar:
         min_value=3,
         max_value=10,
         step=1,
-        help="Типичный диапазон университетской нагрузки. 5–6 дисциплин. максимум 8–10.",
+        help="Типичный диапазон нагрузки — 5–6 дисциплин, максимум 8–10.",
     )
 
     inputs["Curricular units 1st sem (approved)"] = st.number_input(
         "Количество успешно сданных дисциплин в 1 семестре",
-        value=min(6, inputs["Curricular units 1st sem (enrolled)"]),
+        value=5,
         min_value=0,
         max_value=inputs["Curricular units 1st sem (enrolled)"],
         step=1,
@@ -161,10 +198,10 @@ with st.sidebar:
         min_value=0.0,
         max_value=20.0,
         step=0.1,
-        help="Средний итоговый балл. 10–14 соответствует среднему уровню успеваемости.",
+        help="Средний итоговый балл. 10–14 — условный «средний» уровень.",
     )
 
-    # Успеваемость. 2 семестр
+    # Блок: успеваемость 2 семестра
     st.subheader("Успеваемость. 2 семестр")
 
     inputs["Curricular units 2nd sem (enrolled)"] = st.number_input(
@@ -173,12 +210,12 @@ with st.sidebar:
         min_value=3,
         max_value=10,
         step=1,
-        help="Типичный диапазон. 5–6 дисциплин. при перегрузке 8–10.",
+        help="Обычно 5–6 дисциплин, при перегрузке — до 8–10.",
     )
 
     inputs["Curricular units 2nd sem (approved)"] = st.number_input(
         "Количество успешно сданных дисциплин во 2 семестре",
-        value=min(6, inputs["Curricular units 2nd sem (enrolled)"]),
+        value=6,
         min_value=0,
         max_value=inputs["Curricular units 2nd sem (enrolled)"],
         step=1,
@@ -197,14 +234,23 @@ with st.sidebar:
     predict_btn = st.button("Сделать прогноз")
 
 
+# -----------------------------------------------------------------------------
+# Логика прогноза
+# -----------------------------------------------------------------------------
 if predict_btn:
-    # Дополнительные мягкие проверки консистентности
-    if inputs["Curricular units 1st sem (approved)"] > inputs["Curricular units 1st sem (enrolled)"]:
-        st.warning("1 семестр. сдано не может быть больше чем записано.")
-    if inputs["Curricular units 2nd sem (approved)"] > inputs["Curricular units 2nd sem (enrolled)"]:
-        st.warning("2 семестр. сдано не может быть больше чем записано.")
+    # Мягкая проверка консистентности
+    if (
+        inputs["Curricular units 1st sem (approved)"]
+        > inputs["Curricular units 1st sem (enrolled)"]
+    ):
+        st.warning("1 семестр. сдано не может быть больше, чем записано.")
+    if (
+        inputs["Curricular units 2nd sem (approved)"]
+        > inputs["Curricular units 2nd sem (enrolled)"]
+    ):
+        st.warning("2 семестр. сдано не может быть больше, чем записано.")
 
-    # Собираем данные в правильном порядке признаков
+    # Собираем признаки в нужном порядке
     row = {col: inputs[col] for col in FEATURE_COLS}
     X_input = pd.DataFrame([row])
 
@@ -220,36 +266,36 @@ if predict_btn:
         st.subheader("Результат прогноза")
 
         proba_df = pd.DataFrame(
-            {
-                "Исход": classes,
-                "Вероятность": proba,
-            }
+            {"Исход": classes, "Вероятность": np.round(proba, 3)}
         )
-        st.dataframe(proba_df)
+        st.dataframe(proba_df, use_container_width=True)
 
         st.success(f"Наиболее вероятный исход. **{pred_class}**")
 
         if pred_class == "Dropout":
             st.warning(
-                "Модель оценивает высокий риск отчисления."
-                " Рекомендуется проанализировать успеваемость и академическую нагрузку."
-                " Возможны меры поддержки. консультации. пересмотр количества дисциплин."
+                "Модель оценивает высокий риск отчисления. "
+                "Рекомендуется проанализировать успеваемость, академическую нагрузку "
+                "и финансовую дисциплину студента. Возможны меры поддержки "
+                "и снижение нагрузки."
             )
         elif pred_class == "Graduate":
             st.info(
-                "Модель прогнозирует успешное завершение обучения."
-                " Важно поддерживать текущий уровень мотивации и успеваемости."
+                "Модель прогнозирует успешное завершение обучения. "
+                "Важно поддерживать текущий уровень мотивации и успеваемости."
             )
         else:
             st.info(
-                "Модель прогнозирует продолжение обучения."
-                " Рекомендуется следить за динамикой оценок и вовлеченности студента."
+                "Модель прогнозирует продолжение обучения. "
+                "Рекомендуется следить за динамикой оценок и вовлеченности студента, "
+                "чтобы не допустить перехода в группу риска."
             )
 
     except Exception as e:
-        st.error(f"Ошибка при предсказании. {e}")
+        st.error("Произошла ошибка при расчете прогноза.")
+        st.exception(e)
 else:
     st.info(
         "Заполните параметры студента в левой панели и нажмите кнопку "
-        "\"Сделать прогноз\"."
+        "«Сделать прогноз»."
     )
